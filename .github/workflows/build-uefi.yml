@@ -184,12 +184,14 @@ jobs:
           ls -l out/kernel.gz
 
           echo "--- mkbootimg 用法 ---"
-          python3 Mu-Silicium/Resources/Scripts/mkbootimg.py --help 2>&1 | head -15 || true
+          python3 Mu-Silicium/Resources/Scripts/mkbootimg.py --help 2>&1 | head -20 || true
           DTB="devices/$DEVICE/uefi/files/Resources/DTBs/$DEVICE.dtb"
           echo "DTB: $DTB ($(stat -c%s "$DTB" 2>/dev/null || echo 0) 字节)"
+          # 与已知可启动的镜像对齐：kernel_addr=0x06000000 且内核不压缩
           python3 Mu-Silicium/Resources/Scripts/mkbootimg.py \
-            --kernel out/kernel.gz --dtb "$DTB" --header_version 4 --pagesize 4096 \
+            --kernel out/kernel.raw --dtb "$DTB" --base 0x6000000 --pagesize 4096 \
             -o "xnu-$DEVICE.img" 2>&1 | tail -10 || true
+          ls -l xnu-*.img 2>/dev/null
           ls -l xnu-*.img 2>/dev/null || echo "  镜像未生成（看上面的 mkbootimg 报错）"
 
       - name: 上传 FD
