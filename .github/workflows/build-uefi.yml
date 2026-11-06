@@ -76,8 +76,19 @@ jobs:
             fi
           fi
 
-          echo "--- 平台目录 ---"
+          echo "--- 为 FDF/DSC 引用的未分发厂商文件建空占位（blob-free 构建）---"
+          grep -rho 'Binaries/[A-Za-z0-9_./-]*' --include='*.fdf' --include='*.inc' --include='*.dsc' . \
+            | sort -u | while read -r q; do
+              if [ ! -e "$q" ]; then
+                mkdir -p "$(dirname "$q")"
+                : > "$q"
+                echo "  stub: $q"
+              fi
+            done
+
+          echo "--- 平台目录与 FDF 行数 ---"
           ls Platforms/Xiaomi
+          wc -l Platforms/Xiaomi/*/mayfly.fdf 2>/dev/null || true
 
       - name: 读取设备的 FD 参数（FD_BASE / FD_SIZE / FD_BLOCKS）
         id: fd
