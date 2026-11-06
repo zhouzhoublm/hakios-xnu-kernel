@@ -79,6 +79,21 @@ jobs:
           echo "--- 平台目录 ---"
           ls Platforms/Xiaomi
 
+      - name: 读取设备的 FD 参数（FD_BASE / FD_SIZE / FD_BLOCKS）
+        id: fd
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, re, pathlib
+          dev = os.environ['DEVICE']
+          t = pathlib.Path(f"devices/{dev}/uefi/files/Resources/Configs/{dev}.toml").read_text()
+          base = re.search(r'base\s*=\s*(0x[0-9A-Fa-f]+)', t).group(1)
+          size = re.search(r'size\s*=\s*(0x[0-9A-Fa-f]+)', t).group(1)
+          print(f"base={base}")
+          print(f"size={size}")
+          print(f"blocks={int(size, 16)//0x1000}")
+          PY
+
       - name: 构建 UEFI
         run: |
           set -euo pipefail
@@ -88,7 +103,11 @@ jobs:
           echo "--- stuart_update（外部依赖：mu_nasm / Mu-Basetools / onecrypto-bin）---"
           stuart_update -c "$CFG" 2>&1 | tail -40
           echo "--- stuart_build ---"
-          stuart_build -c "$CFG" BLD_*_TARGET=$TARGET 2>&1 | tail -100
+          stuart_build -c "$CFG" \
+            FD_BASE=${{ steps.fd.outputs.base }} \
+            FD_SIZE=${{ steps.fd.outputs.size }} \
+            FD_BLOCKS=${{ steps.fd.outputs.blocks }} \
+            BLD_*_TARGET=$TARGET 2>&1 | tail -100
           echo "--- 产物 ---"
           find . -name '*.fd' | head -10
 
