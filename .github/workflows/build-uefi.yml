@@ -79,6 +79,8 @@ jobs:
           cd Mu-Silicium
           CFG="Platforms/Xiaomi/${DEVICE}Pkg/DeviceBuild.py"
           ls "$CFG"
+          echo "--- stuart_update（外部依赖：mu_nasm / Mu-Basetools / onecrypto-bin）---"
+          stuart_update -c "$CFG" 2>&1 | tail -40
           echo "--- stuart_build ---"
           stuart_build -c "$CFG" BLD_*_TARGET=$TARGET 2>&1 | tail -100
           echo "--- 产物 ---"
