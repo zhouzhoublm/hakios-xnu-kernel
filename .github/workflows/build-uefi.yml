@@ -14,6 +14,10 @@ on:
         description: '设备仓 URL'
         required: true
         default: 'https://github.com/cotunjr/hakios-mayfly.git'
+      payload_mode:
+        description: 'payload 模式：selftest（loader 自检，不要内核）/ full（loader+kernel）'
+        required: true
+        default: 'selftest'
       target:
         description: 'DEBUG 或 RELEASE'
         required: true
@@ -155,10 +159,17 @@ jobs:
 
           ls -l Mu-Silicium/BootShim/BootShim.bin 2>/dev/null || { echo "BootShim 未产出，停止打包"; exit 0; }
 
-          echo "--- 打 XNUP payload ---"
+          echo "--- 打 XNUP payload（模式: ${{ inputs.payload_mode }}）---"
           mkdir -p out
-          python3 xnuloader/mkpayload.py --usb -o out/payload.bin \
-            loader.efi=prebuilt/loader.efi kernel=prebuilt/hakios-kernel 2>&1 | tail -5
+          CMDS="loader_return_after=300 bootcpu=7 cpus=7"
+          if [ "${{ inputs.payload_mode }}" = "selftest" ]; then
+            python3 xnuloader/mkpayload.py --usb --checkpoint 999 -o out/payload.bin \
+              loader.efi=prebuilt/loader.efi --cmdline "$CMDS" 2>&1 | tail -5
+          else
+            python3 xnuloader/mkpayload.py --usb -o out/payload.bin \
+              loader.efi=prebuilt/loader.efi kernel=prebuilt/hakios-kernel \
+              --cmdline "$CMDS" 2>&1 | tail -5
+          fi
           ls -l out/payload.bin
 
           echo "--- shim + fd + payload ---"
