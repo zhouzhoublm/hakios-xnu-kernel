@@ -33,47 +33,67 @@ jobs:
           sudo apt-get install -y -qq build-essential uuid-dev iasl nasm python3 python3-pip git curl
           pip install --quiet edk2-pytool-extensions edk2-pytool-library
 
-      - name: 取 HakiOS UEFI 工程与设备仓（两者都不在内核仓里）
+      - name: 取 HakiOS UEFI 工程与设备仓
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/oosexgang/hakios-uefi.git uefi
           mkdir -p devices
           git clone --depth 1 "${{ inputs.device_repo }}" "devices/$DEVICE"
           echo "BASE = $(cat uefi/BASE)"
-          ls "devices/$DEVICE/uefi" || true
 
       - name: 取 Mu-Silicium 基线并打补丁
         run: |
           set -euo pipefail
           BASE=$(cat uefi/BASE)
-          echo "Mu-Silicium 基线: $BASE"
+          ROOT=$PWD
           git clone --depth 1 https://github.com/Project-Silicium/Mu-Silicium.git Mu-Silicium
           cd Mu-Silicium
           git fetch --depth 1 origin "$BASE"
           git checkout -q "$BASE"
           git submodule update --init --recursive --depth 1
-          echo "--- HakiOS 补丁 ---"
-          git apply --whitespace=nowarn ../uefi/hakios.patch
-          cp -r ../uefi/files/. .
-          echo "--- 设备平台 $DEVICE ---"
-          cp -r "../devices/$DEVICE/uefi/files/." .
-          shopt -s nullglob
-          for p in "../devices/$DEVICE/uefi/patches/"*-worktree.diff; do
-            echo "设备补丁: $p"
-            git apply --whitespace=nowarn "$p" || echo "  (跳过 $p)"
+
+          echo "--- HakiOS 补丁（主树）---"
+          git apply --whitespace=nowarn "$ROOT/uefi/hakios.patch"
+          cp -r "$ROOT/uefi/files/." .
+
+          echo "--- 设备平台 ---"
+          cp -r "$ROOT/devices/$DEVICE/uefi/files/." .
+
+          echo "--- 设备补丁 ---"
+          for p in "$ROOT/devices/$DEVICE/uefi/patches/"*-worktree.diff; do
+            [ -f "$p" ] || continue
+            name=$(basename "$p")
+            case "$name" in
+              *basecore*)
+                # 这个补丁属于 basecore 子模块（UefiCpuPkg 等）
+                bc=$(find . -maxdepth 3 -type d -name UefiCpuPkg | head -1)
+                if [ -n "$bc" ]; then
+                  sub=$(dirname "$bc")
+                  echo "  $name -> $sub"
+                  ( cd "$sub" && git apply --whitespace=nowarn "$p" ) || echo "  (跳过 $name)"
+                else
+                  echo "  找不到 basecore 子模块，跳过 $name"
+                fi
+                ;;
+              *)
+                echo "  $name -> 主树"
+                git apply --whitespace=nowarn "$p" || echo "  (跳过 $name)"
+                ;;
+            esac
           done
           echo "--- 平台 ---"
-          ls Platforms/Xiaomi || true
+          ls Platforms/Xiaomi
 
       - name: 构建 UEFI
         run: |
           set -euo pipefail
           cd Mu-Silicium
-          DEV=${DEVICE}Pkg
-          CFG="Platforms/Xiaomi/$DEV/DeviceBuild.py"
-          ls "Platforms/Xiaomi/$DEV" || { echo "没有 $DEV"; ls Platforms/Xiaomi; exit 1; }
-          echo "--- stuart build ---"
-          stuart_build -c "$CFG" --tool-chain-tag CLANGPDB --target "$MODE" 2>&1 | tail -60 || true
+          CFG="Platforms/Xiaomi/${DEVICE}Pkg/DeviceBuild.py"
+          ls "$CFG" || { echo "没有 $CFG"; exit 1; }
+          echo "--- stuart_build 帮助（便于确认参数）---"
+          stuart_build --help 2>&1 | head -20 || true
+          echo "--- 构建 ---"
+          stuart_build -c "$CFG" --toolchain CLANGPDB --target "$MODE" 2>&1 | tail -80
           echo "--- 产物 ---"
           find . -name '*.fd' | head -10
 
@@ -83,7 +103,6 @@ jobs:
         with:
           name: uefi-fd-${{ inputs.device }}
           path: |
-            Mu-Silicium/Build/**/FV/*.fd
             Mu-Silicium/Build/**/*.fd
           if-no-files-found: warn
           retention-days: 7
