@@ -172,27 +172,35 @@ jobs:
           fi
           ls -l out/payload.bin
 
-          echo "--- shim + fd + payload ---"
+          echo "--- 按 UniXNU 验证过的配方打包 ---"
+          # kernel = gzip(shim + FD + payload) + DTB   （DTB 追加在内核尾部，经 x0 传给固件）
           python3 - "$FD" <<'PY2'
-          import sys, pathlib
-          fd = pathlib.Path(sys.argv[1])
-          blob = pathlib.Path('Mu-Silicium/BootShim/BootShim.bin').read_bytes() + fd.read_bytes() + pathlib.Path('out/payload.bin').read_bytes()
-          pathlib.Path('out/kernel.raw').write_bytes(blob)
-          print('  kernel.raw', len(blob))
+          import sys, gzip, pathlib
+          fd = pathlib.Path(sys.argv[1]).read_bytes()
+          shim = pathlib.Path('Mu-Silicium/BootShim/BootShim.bin').read_bytes()
+          payload = pathlib.Path('out/payload.bin').read_bytes()
+          dtb = pathlib.Path(f"devices/{__import__('os').environ['DEVICE']}/uefi/files/Resources/DTBs/{__import__('os').environ['DEVICE']}.dtb").read_bytes()
+          combined = shim + fd + payload
+          kernel = gzip.compress(combined, mtime=0) + dtb
+          pathlib.Path('out/kernel').write_bytes(kernel)
+          pathlib.Path('out/ramdisk').write_bytes(b'')
+          print('  shim=%d fd=%d payload=%d dtb=%d -> kernel=%d' % (len(shim), len(fd), len(payload), len(dtb), len(kernel)))
           PY2
-          gzip -9 -c out/kernel.raw > out/kernel.gz
-          ls -l out/kernel.gz
 
-          echo "--- mkbootimg 用法 ---"
-          python3 Mu-Silicium/Resources/Scripts/mkbootimg.py --help 2>&1 | head -20 || true
-          DTB="devices/$DEVICE/uefi/files/Resources/DTBs/$DEVICE.dtb"
-          echo "DTB: $DTB ($(stat -c%s "$DTB" 2>/dev/null || echo 0) 字节)"
-          # 与已知可启动的镜像对齐：kernel_addr=0x06000000 且内核不压缩
+          echo "--- mkbootimg（v4 + 空 ramdisk）---"
           python3 Mu-Silicium/Resources/Scripts/mkbootimg.py \
-            --kernel out/kernel.raw --dtb "$DTB" --base 0x6000000 --pagesize 4096 \
-            -o "xnu-$DEVICE.img" 2>&1 | tail -10 || true
-          ls -l xnu-*.img 2>/dev/null
-          ls -l xnu-*.img 2>/dev/null || echo "  镜像未生成（看上面的 mkbootimg 报错）"
+            --header_version 4 --kernel out/kernel --ramdisk out/ramdisk \
+            -o "xnu-$DEVICE.img" 2>&1 | tail -5
+          ls -l xnu-*.img
+          python3 - <<'PY3'
+          import struct, pathlib
+          b = pathlib.Path([str(p) for p in pathlib.Path('.').glob('xnu-*.img')][0]).read_bytes()
+          ks, rs, osv, hs = struct.unpack_from('<4I', b, 8)
+          hv = struct.unpack_from('<I', b, 40)[0]
+          print('  校验: header_version=%d header_size=%d kernel_size=%d ramdisk_size=%d 总长=%d' % (hv, hs, ks, rs, len(b)))
+          assert b[:8] == b'ANDROID!' and hv == 4 and hs == 1584, '头格式不对'
+          print('  ✓ 头格式与已知可启动镜像一致')
+          PY3
 
       - name: 上传 FD
         if: always()
