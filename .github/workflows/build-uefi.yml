@@ -122,6 +122,47 @@ jobs:
           echo "--- 产物 ---"
           find . -name '*.fd' | head -10
 
+      - name: 打包可上机镜像（BootShim + FD + payload）
+        run: |
+          set -euo pipefail
+          ROOT=$PWD
+          FD=$(find Mu-Silicium/Build -name 'SILICIUM_UEFI.fd' | head -1)
+          echo "FD: $FD ($(stat -c%s "$FD") 字节)"
+          FD_BASE=${{ steps.fd.outputs.base }}
+          FD_SIZE=${{ steps.fd.outputs.size }}
+          PAYLOAD_BASE=$(grep -oE 'XNU_PAYLOAD_BASE=0x[0-9A-Fa-f]+' "devices/$DEVICE/uefi/files/Platforms/Xiaomi/${DEVICE}Pkg/${DEVICE}.dsc" | head -1 | cut -d= -f2)
+          echo "FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE"
+
+          echo "--- 1) 构建 BootShim ---"
+          ( cd Mu-Silicium/BootShim && make clean >/dev/null 2>&1 || true )
+          ( cd Mu-Silicium/BootShim && make REQUIRES_KERNEL_HEADER=1 FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE \
+              CFLAGS="--target=aarch64-linux-gnu -DPAYLOAD_BASE=$PAYLOAD_BASE" 2>&1 | tail -10 )
+          ls -l Mu-Silicium/BootShim/BootShim.bin
+
+          echo "--- 2) 打 XNUP payload（预编译 loader + kernel）---"
+          mkdir -p out
+          python3 xnuloader/mkpayload.py --usb -o out/payload.bin \
+            loader.efi=prebuilt/loader.efi kernel=prebuilt/hakios-kernel
+          ls -l out/payload.bin
+
+          echo "--- 3) shim + fd + payload ---"
+          python3 - "$FD" out/payload.bin out/kernel.raw <<'PY2'
+          import sys, pathlib
+          fd, payload, out = (pathlib.Path(x) for x in sys.argv[1:4])
+          blob = pathlib.Path('Mu-Silicium/BootShim/BootShim.bin').read_bytes() + fd.read_bytes() + payload.read_bytes()
+          out.write_bytes(blob)
+          print('  kernel.raw', len(blob), '字节')
+          PY2
+          gzip -9 -c out/kernel.raw > out/kernel.gz
+          ls -l out/kernel.gz
+
+          echo "--- 4) mkbootimg ---"
+          DTB="devices/$DEVICE/uefi/files/Resources/DTBs/$DEVICE.dtb"
+          python3 Mu-Silicium/Resources/Scripts/mkbootimg.py \
+            --kernel out/kernel.gz --dtb "$DTB" --header_version 4 --pagesize 4096 \
+            -o "xnu-$DEVICE-$(date +%Y%m%d).img" 2>&1 | tail -10 || true
+          ls -l xnu-*.img 2>/dev/null || echo "  mkbootimg 参数需调整"
+
       - name: 上传 FD
         if: always()
         uses: actions/upload-artifact@v4
@@ -129,5 +170,6 @@ jobs:
           name: uefi-fd-${{ inputs.device }}
           path: |
             Mu-Silicium/Build/**/*.fd
+            xnu-*.img
           if-no-files-found: warn
           retention-days: 7
