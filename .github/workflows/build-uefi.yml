@@ -1,6 +1,8 @@
 name: build-uefi
 
 # 构建 HakiOS 的 UEFI（Mu-Silicium + HakiOS 补丁 + 设备平台），产出 SILICIUM_UEFI.fd
+# 注：设备仓里的 *-worktree.diff 是"参考、未整理"的调试产物（见 devices/<dev>/uefi/patches/README.md），
+#     不应用它们；blob-free 启动只需要 hakios.patch + uefi/files + 设备平台。
 on:
   workflow_dispatch:
     inputs:
@@ -12,7 +14,7 @@ on:
         description: '设备仓 URL'
         required: true
         default: 'https://github.com/cotunjr/hakios-mayfly.git'
-      mode:
+      target:
         description: 'DEBUG 或 RELEASE'
         required: true
         default: 'DEBUG'
@@ -22,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DEVICE: ${{ inputs.device }}
-      MODE: ${{ inputs.mode }}
+      TARGET: ${{ inputs.target }}
     steps:
       - name: checkout 内核仓
         uses: actions/checkout@v4
@@ -52,36 +54,23 @@ jobs:
           git checkout -q "$BASE"
           git submodule update --init --recursive --depth 1
 
-          echo "--- HakiOS 补丁（主树）---"
+          echo "--- HakiOS 补丁 ---"
           git apply --whitespace=nowarn "$ROOT/uefi/hakios.patch"
           cp -r "$ROOT/uefi/files/." .
 
-          echo "--- 设备平台 ---"
+          echo "--- 设备平台 $DEVICE ---"
           cp -r "$ROOT/devices/$DEVICE/uefi/files/." .
 
-          echo "--- 设备补丁 ---"
-          for p in "$ROOT/devices/$DEVICE/uefi/patches/"*-worktree.diff; do
-            [ -f "$p" ] || continue
-            name=$(basename "$p")
-            case "$name" in
-              *basecore*)
-                # 这个补丁属于 basecore 子模块（UefiCpuPkg 等）
-                bc=$(find . -maxdepth 3 -type d -name UefiCpuPkg | head -1)
-                if [ -n "$bc" ]; then
-                  sub=$(dirname "$bc")
-                  echo "  $name -> $sub"
-                  ( cd "$sub" && git apply --whitespace=nowarn "$p" ) || echo "  (跳过 $name)"
-                else
-                  echo "  找不到 basecore 子模块，跳过 $name"
-                fi
-                ;;
-              *)
-                echo "  $name -> 主树"
-                git apply --whitespace=nowarn "$p" || echo "  (跳过 $name)"
-                ;;
-            esac
-          done
-          echo "--- 平台 ---"
+          echo "--- 设备的 XnuLoader.h（PAYLOAD_BASE 覆盖） ---"
+          if [ -f "$ROOT/devices/$DEVICE/uefi/patches/XnuLoader.h.$DEVICE" ]; then
+            XH=$(find . -name 'XnuLoader.h' | head -1)
+            if [ -n "$XH" ]; then
+              echo "  覆盖 $XH"
+              cp "$ROOT/devices/$DEVICE/uefi/patches/XnuLoader.h.$DEVICE" "$XH"
+            fi
+          fi
+
+          echo "--- 平台目录 ---"
           ls Platforms/Xiaomi
 
       - name: 构建 UEFI
@@ -89,11 +78,9 @@ jobs:
           set -euo pipefail
           cd Mu-Silicium
           CFG="Platforms/Xiaomi/${DEVICE}Pkg/DeviceBuild.py"
-          ls "$CFG" || { echo "没有 $CFG"; exit 1; }
-          echo "--- stuart_build 帮助（便于确认参数）---"
-          stuart_build --help 2>&1 | head -20 || true
-          echo "--- 构建 ---"
-          stuart_build -c "$CFG" --toolchain CLANGPDB --target "$MODE" 2>&1 | tail -80
+          ls "$CFG"
+          echo "--- stuart_build ---"
+          stuart_build -c "$CFG" BLD_*_TARGET=$TARGET 2>&1 | tail -100
           echo "--- 产物 ---"
           find . -name '*.fd' | head -10
 
