@@ -37,7 +37,8 @@ jobs:
       - name: 依赖
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential uuid-dev iasl nasm git curl mono-devel ca-certificates-mono
+          sudo apt-get install -y -qq build-essential uuid-dev iasl nasm git curl mono-devel ca-certificates-mono \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           python3 -m pip install --quiet --upgrade pip
           python3 -m pip install --quiet edk2-pytool-extensions edk2-pytool-library regex
 
@@ -123,45 +124,62 @@ jobs:
           find . -name '*.fd' | head -10
 
       - name: 打包可上机镜像（BootShim + FD + payload）
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ROOT=$PWD
           FD=$(find Mu-Silicium/Build -name 'SILICIUM_UEFI.fd' | head -1)
-          echo "FD: $FD ($(stat -c%s "$FD") 字节)"
+          echo "FD: $FD ($(stat -c%s "$FD" 2>/dev/null || echo 0) 字节)"
           FD_BASE=${{ steps.fd.outputs.base }}
           FD_SIZE=${{ steps.fd.outputs.size }}
-          PAYLOAD_BASE=$(grep -oE 'XNU_PAYLOAD_BASE=0x[0-9A-Fa-f]+' "devices/$DEVICE/uefi/files/Platforms/Xiaomi/${DEVICE}Pkg/${DEVICE}.dsc" | head -1 | cut -d= -f2)
+          DSCR="devices/$DEVICE/uefi/files/Platforms/Xiaomi/${DEVICE}Pkg/${DEVICE}.dsc"
+          PAYLOAD_BASE=$(grep -oE 'XNU_PAYLOAD_BASE=0x[0-9A-Fa-f]+' "$DSCR" | head -1 | cut -d= -f2)
           echo "FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE"
 
-          echo "--- 1) 构建 BootShim ---"
-          ( cd Mu-Silicium/BootShim && make clean >/dev/null 2>&1 || true )
-          ( cd Mu-Silicium/BootShim && make REQUIRES_KERNEL_HEADER=1 FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE \
-              CFLAGS="--target=aarch64-linux-gnu -DPAYLOAD_BASE=$PAYLOAD_BASE" 2>&1 | tail -10 )
-          ls -l Mu-Silicium/BootShim/BootShim.bin
+          echo "--- BootShim Makefile 前 25 行（诊断用）---"
+          head -25 Mu-Silicium/BootShim/Makefile || true
 
-          echo "--- 2) 打 XNUP payload（预编译 loader + kernel）---"
+          echo "--- 尝试 1：aarch64-linux-gnu-gcc ---"
+          ( cd Mu-Silicium/BootShim && make clean >/dev/null 2>&1 || true
+            make CC=aarch64-linux-gnu-gcc OBJCOPY=aarch64-linux-gnu-objcopy \
+                 REQUIRES_KERNEL_HEADER=1 FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE \
+                 CFLAGS="-DPAYLOAD_BASE=$PAYLOAD_BASE" 2>&1 | tail -12 ) || true
+
+          if [ ! -f Mu-Silicium/BootShim/BootShim.bin ]; then
+            echo "--- 尝试 2：clang --target ---"
+            ( cd Mu-Silicium/BootShim && make clean >/dev/null 2>&1 || true
+              make CC=clang LD=ld.lld OBJCOPY=llvm-objcopy \
+                   REQUIRES_KERNEL_HEADER=1 FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE \
+                   CFLAGS="--target=aarch64-linux-gnu -DPAYLOAD_BASE=$PAYLOAD_BASE" 2>&1 | tail -12 ) || true
+          fi
+
+          ls -l Mu-Silicium/BootShim/BootShim.bin 2>/dev/null || { echo "BootShim 未产出，停止打包"; exit 0; }
+
+          echo "--- 打 XNUP payload ---"
           mkdir -p out
           python3 xnuloader/mkpayload.py --usb -o out/payload.bin \
-            loader.efi=prebuilt/loader.efi kernel=prebuilt/hakios-kernel
+            loader.efi=prebuilt/loader.efi kernel=prebuilt/hakios-kernel 2>&1 | tail -5
           ls -l out/payload.bin
 
-          echo "--- 3) shim + fd + payload ---"
-          python3 - "$FD" out/payload.bin out/kernel.raw <<'PY2'
+          echo "--- shim + fd + payload ---"
+          python3 - "$FD" <<'PY2'
           import sys, pathlib
-          fd, payload, out = (pathlib.Path(x) for x in sys.argv[1:4])
-          blob = pathlib.Path('Mu-Silicium/BootShim/BootShim.bin').read_bytes() + fd.read_bytes() + payload.read_bytes()
-          out.write_bytes(blob)
-          print('  kernel.raw', len(blob), '字节')
+          fd = pathlib.Path(sys.argv[1])
+          blob = pathlib.Path('Mu-Silicium/BootShim/BootShim.bin').read_bytes() + fd.read_bytes() + pathlib.Path('out/payload.bin').read_bytes()
+          pathlib.Path('out/kernel.raw').write_bytes(blob)
+          print('  kernel.raw', len(blob))
           PY2
           gzip -9 -c out/kernel.raw > out/kernel.gz
           ls -l out/kernel.gz
 
-          echo "--- 4) mkbootimg ---"
+          echo "--- mkbootimg 用法 ---"
+          python3 Mu-Silicium/Resources/Scripts/mkbootimg.py --help 2>&1 | head -15 || true
           DTB="devices/$DEVICE/uefi/files/Resources/DTBs/$DEVICE.dtb"
+          echo "DTB: $DTB ($(stat -c%s "$DTB" 2>/dev/null || echo 0) 字节)"
           python3 Mu-Silicium/Resources/Scripts/mkbootimg.py \
             --kernel out/kernel.gz --dtb "$DTB" --header_version 4 --pagesize 4096 \
-            -o "xnu-$DEVICE-$(date +%Y%m%d).img" 2>&1 | tail -10 || true
-          ls -l xnu-*.img 2>/dev/null || echo "  mkbootimg 参数需调整"
+            -o "xnu-$DEVICE.img" 2>&1 | tail -10 || true
+          ls -l xnu-*.img 2>/dev/null || echo "  镜像未生成（看上面的 mkbootimg 报错）"
 
       - name: 上传 FD
         if: always()
