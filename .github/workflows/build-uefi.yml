@@ -37,7 +37,7 @@ jobs:
       - name: 依赖
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential uuid-dev iasl nasm git curl
+          sudo apt-get install -y -qq build-essential uuid-dev iasl nasm git curl mono-complete ca-certificates-mono
           python3 -m pip install --quiet --upgrade pip
           python3 -m pip install --quiet edk2-pytool-extensions edk2-pytool-library regex
 
